@@ -1,0 +1,589 @@
+---
+title: "Data_modified"
+author: "mingyu"
+date: "9/10/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#This function is used to transfer the orginal data to modified data that can be used in SLEP package
+```
+
+
+
+
+
+```{r}
+
+library(corpcor)
+library(MASS)
+library(Matrix)
+library(gglasso)
+library(glmnet)
+library(R.matlab)
+library(matlabr)
+library(seventyGeneData)
+library(qusage)
+library(Biobase)
+library(breastCancerNKI)
+```
+
+```{r}
+data(nki)
+data(vanDeVijver)
+expressnki = exprs(nki)
+expressvan = exprs(vanDeVijver)
+
+pdata <- pData(nki)
+
+which(is.na(pdata$e.os))
+
+temp = pdata[which(is.na(pdata$e.os)),]
+
+Y = pdata[-which(is.na(pdata$e.os)),]$e.os
+
+length(which(is.na(Y)))
+
+
+
+#Matrix containing gene expressions as measured by Agilent technology (dualchannel, oligonucleotides).
+
+express = exprs(nki)
+tempe = express[,which(is.na(pdata$e.os))]
+express <- express[,-which(is.na(pdata$e.os))]
+
+
+featuredata <- fData(nki)
+experiment <- experimentData(nki)
+
+genewithid <- !is.na(featuredata$EntrezGene.ID)
+expressclean <- express[genewithid,]
+dim(expressclean)
+featuredataclean <- featuredata[genewithid,]
+
+sum(row.names(featuredataclean) == row.names(expressclean))
+
+```
+
+
+```{r}
+
+#grps <- read.gmt("/Users/mingyuqi/Dropbox/Mac/Desktop/gene_set/c2.cp.pid.v2022.1.Hs.entrez.gmt")
+#grps <- read.gmt("/Users/mingyuqi/Dropbox/Mac/Desktop/gene_set/c2.cp.kegg.v2022.1.Hs.entrez.gmt)
+grps <- read.gmt("/Users/mingyuqi/Dropbox/Mac/Desktop/gene_set/c2.cp.biocarta.v2022.1.Hs.entrez.gmt")
+
+#grps <- read.gmt("/Users/mingyuqi/Dropbox/Mac/Desktop/gene_set/c6.all.v2022.1.Hs.entrez.gmt")
+
+#grps <- read.gmt("/Users/mingyuqi/Dropbox/Mac/Desktop/gene_set/c4.cm.v2022.1.Hs.entrez.gmt")
+
+#grps <- read.gmt("/Users/mingyuqi/Dropbox/Mac/Desktop/gene_set/c2.cp.wikipathways.v2022.1.Hs.entrez.gmt")
+
+
+
+list2df <- function(grps){
+  
+  n <- length(grps)
+  p <- sapply(grps, length)
+  p1 <- max(p)
+  grps1 <- matrix(NA, nrow = n, ncol = p1)
+  for(i in 1:n){
+    grps1[i,1:p[i]] <- grps[[i]]
+  }
+  grps1 <- as.data.frame(grps1)
+  grps1 <- cbind(names(grps), grps1)
+  colnames(grps1)[1] <- "pathwayname"
+  return(grps1)
+}
+grps <- list2df(grps)
+#row.names(grps) = 1:dim(grps)[1]
+
+passway<-grps$pathwayname
+
+passway <- unique(passway)
+
+
+
+#gene with id
+gene_list <- featuredataclean$EntrezGene.ID
+
+
+gene_list <-  gsub(" ", "", gene_list, fixed = TRUE)
+
+featuredataclean$EntrezGene.ID <- gene_list
+
+## we restricted ourselves to the groups that contained less than 50 genes
+## We restrict the analysis to the genes which are in at least one pathway.
+## Romove the genes that not in the data
+
+refine_pathway <- function(grps, gene_list, max_size = 200, min_size = 1){
+  
+  grp_size <- apply(grps, 1, function(x){sum(!is.na(x))}) - 1
+  
+  smallgrps <- grps[grp_size < max_size,]
+  
+  row.names(smallgrps) = 1:dim(smallgrps)[1]
+  
+  grpsclean <- data.frame(gene = "", pathway = "")
+  
+  for(i in 1:nrow(smallgrps)){
+    tt <- smallgrps[i,2:ncol(smallgrps)]
+    tmpgr <- tt[!is.na(smallgrps[i,2:ncol(smallgrps)])]
+    
+    inter_tmp <- base::intersect(gene_list , tmpgr)
+    
+    if(length(inter_tmp) >= min_size){
+      grps_tmp <- data.frame(gene = unlist(inter_tmp), pathway = smallgrps$pathwayname[i])
+      grpsclean <- rbind(grpsclean, grps_tmp)
+    }
+  }
+  grpsclean <- grpsclean[-1,]
+  return(grpsclean)
+}
+
+groupinf <- refine_pathway(grps, gene_list , 3000, 1)
+
+library(dplyr)
+A<-groupinf %>% group_by(groupinf$pathway) %>% summarise(count=n())
+
+```
+
+
+
+```{r}
+## Determine the genes
+
+gene_list_refine <- which(!is.na(match(gene_list, groupinf$gene)))
+
+#gene_list_duplicate <- duplicated(gene_list[gene_list_refine])
+
+#gene_list_refine <- gene_list_refine[!gene_list_duplicate]
+
+geneuse <- gene_list[gene_list_refine]
+
+length(which(is.na(match(geneuse, groupinf$gene))))
+
+## Get the design matrix
+
+featureselect <- featuredataclean[which(!is.na(match(featuredataclean$EntrezGene.ID, geneuse))),]
+
+
+
+selectgenename <- featureselect$Substance
+
+#selectgenename <- duplicated(featureselect$EntrezGene.ID)
+
+expressclean <- expressclean[row.names(expressclean) %in% selectgenename,]
+
+
+expressclean[,296] <- featureselect$EntrezGene.ID
+
+testexpress <- aggregate(expressclean[,-296], list(expressclean$V296), FUN=mean)
+
+row.names(testexpress) <- testexpress$Group.1
+expressclean <- testexpress[,-1]
+
+#length(which(!is.na(match(testexpress$Group.1, geneuse))))
+
+which(duplicated(row.names(expressclean)) == "TRUE")
+
+Design <- as.matrix(expressclean)
+
+X<- t(Design)
+```
+
+
+
+
+```{r}
+## Generate groups 
+pathway_tab <- unique(groupinf$pathway)
+g <- length(pathway_tab)
+G <- matrix(0, nrow = g, ncol = nrow(expressclean))
+colnames(G) <- row.names(expressclean)
+rownames(G) <- pathway_tab
+
+for(i in 1:g){
+
+  geneidinthisgroup = groupinf[which(groupinf$pathway == pathway_tab[i]),]$gene
+  
+ # idx <- which(!is.na(match(featureselect$EntrezGene.ID,geneidinthisgroup)))
+  
+  idx <- which(!is.na(match(row.names(expressclean),geneidinthisgroup)))
+  
+  G[i,idx] <- 1
+  
+ # genenameisthisgroup =  featureselect[idx,]$Substance
+    
+  #G[i,which(colnames(G) %in% genenameisthisgroup)] <- 1
+}
+
+summary(colSums(G))
+length(which(colSums(G) == 1))
+summary(rowSums(G))
+
+
+##transfer G to the version used in SLEP
+##add groupnum in the end
+
+
+
+cvt_OG_ind <- function(G){
+
+  d_G <- rowSums(G)
+  p <- ncol(G)
+  g <- nrow(G)
+  opt.G <- c()
+  opt.ind <- matrix(0, nrow = 3, ncol = g)
+  l0 = 1
+  for(i in 1:g){
+    
+    tmp_idx <- which(G[i,] == 1)
+    l1 = l0 + length(tmp_idx) 
+    opt.G <- c(opt.G, tmp_idx)
+    opt.ind[1,i] = l0
+    opt.ind[2,i] = l1-1
+    opt.ind[3,i] = sqrt(d_G[i])
+    l0 = l1
+    
+  }
+  
+  return(list(opt.G = opt.G, opt.ind = opt.ind))
+} 
+
+cvt_G_ind <- function(G, D){
+
+  d_G <-  D
+  p <- ncol(G)
+  g <- nrow(G)
+  opt.G <- c()
+  opt.ind <- matrix(0, nrow = 3, ncol = g)
+  l0 = 1
+  for(i in 1:g){
+    
+    tmp_idx <- which(G[i,] == 1)
+    l1 = l0 + length(tmp_idx) 
+    opt.G <- c(opt.G, tmp_idx)
+    opt.ind[1,i] = l0
+    opt.ind[2,i] = l1-1
+    opt.ind[3,i] = d_G[i]
+    l0 = l1
+    
+  }
+  
+  return(list(opt.G = opt.G, opt.ind = opt.ind))
+} 
+
+OGG <- cvt_OG_ind(G)
+OGG$opt.G[1:100]
+
+OGG$opt.ind[1:3,1:20]
+
+```
+
+```{r}
+### ogl
+#G = matrix(c(1,0,0,0,1,0,0,1,0,1,0,1),3,4)
+pargroup <- function(G){
+  g <- nrow(G)
+  p <- ncol(G)
+  D0 <- sqrt(rowSums(G))
+  D1 <- c()
+  G1 <- matrix(0, nrow = 5*p, ncol = p)
+  
+  H <- colSums(G)
+  l <- names(table(H))
+  k <- 1
+  for(i in l){
+    
+    i <- as.numeric(i)
+    idx_tmp <- which(H == i)
+    tmp <- G[,idx_tmp]
+    if (length(idx_tmp) == 1) {
+      idx_tmp1 <- which(G[,idx_tmp] == 1)
+      idx_tmp1 <- sort(idx_tmp1)
+      G_tmp = paste0(idx_tmp1, collapse = "_")
+      grp_tmp <- names(table(G_tmp))
+  }else{G_tmp <- apply(tmp, 2, function(x){
+      idx_tmp1 <- which(x == 1)
+      idx_tmp1 <- sort(idx_tmp1)
+      paste0(idx_tmp1, collapse = "_")})
+    grp_tmp <- names(table(G_tmp))
+   }
+    
+    for(j in 1:length(grp_tmp)){
+      G1[k,idx_tmp[G_tmp == grp_tmp[j]]] <- 1
+      D1_tmp <- as.numeric(strsplit(grp_tmp[j],"_")[[1]])
+      D1[k] <- sum(D0[D1_tmp])
+      k <- k + 1
+    }
+  }
+  G1 <- G1[1:k,]
+  G1 <- G1[rowSums(G1)>0,]
+  return(list(G1 = G1, D0 = D0, D1 = D1))
+}
+
+slepgl1 <- function(parG, X, G, D1){
+  
+  idx <- apply(parG, 2, which.max)
+  idx_order <- order(idx, decreasing = F)
+  X_new <- X[,idx_order]
+  G_new <- G[,idx_order]
+  parG_new <- parG[,idx_order]
+  
+ return(list(G1new =parG_new, Xnew = X_new, D1new = D1,G_new = G_new))
+}
+```
+
+
+```{r}
+### ogl
+
+
+
+  X <- as.matrix(X)
+  mu <- apply(X,2, median, na.rm = TRUE)
+  for(i in 1:ncol(X)){
+    X_tmp <- X[,i]
+    X_tmp[is.na(X_tmp)] <- mu[i]
+    X[,i] <- X_tmp
+  }
+  
+  X <- scale(X)
+  
+   par <- pargroup(G)
+   parG <- par$G1
+   D <- par$D1
+  glpar <- slepgl1(parG,X,G,D)
+  Gpar <- glpar$G1new
+  Xnew <- glpar$Xnew
+  Dnew <- glpar$D1new
+  Gnew <- glpar$G_new
+  G_mat <- cvt_OG_ind(Gnew)
+  try(file.remove("./realmatlab_res.csv"))
+  mat_file = list(X = Xnew, Y = Y, opt_G = as.double(G_mat$opt.G), opt_ind = G_mat$opt.ind)
+  
+  writeMat("./data/simudatabio.mat",data = mat_file)
+
+  ########   wsglasso
+
+  
+  G_matwsg <- cvt_G_ind(Gpar,Dnew)
+  try(file.remove("./realwsgmatlabio.csv"))
+  mat_file = list(X = Xnew, Y = Y, opt_ind = G_matwsg$opt.ind)
+  
+
+  
+  writeMat("./data/simuwsgdatabio.mat",data = mat_file)
+
+   ########   wlasso
+  try(file.remove("./reallassomatlab_res.csv"))
+  mat_file = list(X = Xnew,Y = Y, W = sqrt(colSums(Gnew)))
+  
+  writeMat("./data/simulassodatabio.mat",data = mat_file)
+
+  
+
+
+
+```
+
+```{r}
+### ogl
+
+ogreal <- function(Y, X, G, nfold = 5){
+  
+   nfold = 5
+  Y[which(Y == 0 )] = -1
+  Y <- as.matrix(Y)
+  X <- as.matrix(X)
+  mu <- apply(X,2, median, na.rm = TRUE)
+  for(i in 1:ncol(X)){
+    X_tmp <- X[,i]
+    X_tmp[is.na(X_tmp)] <- mu[i]
+    X[,i] <- X_tmp
+  }
+  
+  X <- scale(X)
+  
+  #tmp <- sample(nrow(X), 200, replace = F)
+  #trainX <- X[tmp, ]
+  #testX <- X[-tmp,]
+  
+  #trainY <- Y[tmp]
+  #testY <- Y[-tmp]
+  
+  ########   Oglasso
+  
+  G_mat <- cvt_OG_ind(G)
+  try(file.remove("./realmatlab_res.csv"))
+  mat_file = list(X = X, Y = Y, opt_G = as.double(G_mat$opt.G), opt_ind = G_mat$opt.ind, K = nfold)
+  
+  writeMat("./data/realdatacp.mat",data = mat_file)
+#writeMat("./data/realdatakegg.mat",data = mat_file)
+#writeMat("./data/realdataont.mat",data = mat_file)
+#writeMat("./data/realdatabio.mat",data = mat_file)
+#writeMat("./data/realdatapid.mat",data = mat_file)
+  #writeMat("./data/realdatareac.mat",data = mat_file)
+# writeMat("./data/realdatawiki.mat",data = mat_file)
+  x <- run_matlab_script("./readataog.m")
+  
+  res_realoglasso <- read.csv("./realmatlab_res.csv", header = F)
+  solve_realoglasso = res_realoglasso[1,]
+  t_realoglasso = res_realoglasso[2,]
+  acc_realoglasso = res_realoglasso[3,]
+  beta_realmat <- res_realoglasso[-c(1,2,3),drop = F]
+  
+  ########   wsglasso
+  
+  par <- pargroup(G)
+   parG <- par$G1
+   D <- par$D1
+  glpar <- slepgl1(parG,X,D)
+  Ginf <- glpar$G1new
+  Xnew <- glpar$Xnew
+  Dnew <- glpar$D1new
+  
+  #trainXnew <- Xnew[tmp, ]
+  #testXnew <- Xnew[-tmp,]
+  
+  G_matwsg <- cvt_G_ind(Ginf,Dnew)
+  try(file.remove("./realwsgmatlab_res.csv"))
+  mat_file = list(X = Xnew,Y = Y,  opt_G = as.double(G_matwsg$opt.G), opt_ind = G_matwsg$opt.ind, K = nfold)
+  
+  writeMat("./data/realwsgdatacp.mat",data = mat_file)
+ #writeMat("./data/realwsgdatakegg.mat",data = mat_file)
+  #writeMat("./data/realwsgdataont.mat",data = mat_file)
+ # writeMat("./data/realwsgdatabio.mat",data = mat_file)
+ #writeMat("./data/realwsgdatapid.mat",data = mat_file)
+  #writeMat("./data/realwsgdatareac.mat",data = mat_file)
+  #writeMat("./data/realwsgdatawiki.mat",data = mat_file)
+  x <- run_matlab_script("./readdatawsg.m")
+  
+  res_realwsglasso <- read.csv("./realwsgmatlab_res.csv", header = F)
+  solve_realwsglasso = res_realwsglasso[1,]
+  t_realwsglasso = res_realwsglasso[2,]
+  acc_realwsglasso = res_realwsglasso[3,]
+  beta_wsgmat <- res_realwsglasso[-c(1,2,3),drop = F]
+  
+  ########   wglasso
+  
+  
+  Ginft <- indgroup(Ginf)
+  
+  
+  #trainXnew <- Xnew[tmp, ]
+  #testXnew <- Xnew[-tmp,]
+  
+  
+  #G_mat <- cvt_OG_ind(G)
+  try(file.remove("./realwglmatlab_res.csv"))
+  mat_file = list(X = Xnew,Y =Y, opt_G = as.double(Ginft), opt_w = Dnew, K = nfold)
+  
+ writeMat("./data/realwgldatacp.mat",data = mat_file)
+  #writeMat("./data/realwgldatakegg.mat",data = mat_file)
+ # writeMat("./data/realwgldataont.mat",data = mat_file)
+   #writeMat("./data/realwgldatabio.mat",data = mat_file)
+  # writeMat("./data/realwgldatapid.mat",data = mat_file)
+  #writeMat("./data/realwgldatareac.mat",data = mat_file)
+ # writeMat("./data/realwgldatawiki.mat",data = mat_file)
+
+
+  x <- run_matlab_script("./realdatawgl.m")
+  
+  res_realwgllasso <- read.csv("./realwglmatlab_res.csv", header = F)
+  solve_realwgllasso = res_realwgllasso[1,]
+  t_realwgllasso = res_realwgllasso[2,]
+  acc_realwgllasso = res_realwgllasso[3,]
+  beta_wglmat <- res_realwgllasso[-c(1,2,3),drop = F]
+  
+  
+    ########   lasso
+
+  
+  
+  #G_mat <- cvt_OG_ind(G)
+  try(file.remove("./reallassomatlab_res.csv"))
+  mat_file = list(X = X, Y = Y, K = nfold)
+  
+  writeMat("./data/reallassodatacp.mat",data = mat_file)
+  #writeMat("./data/reallassodatakegg.mat",data = mat_file)
+# writeMat("./data/reallassodataont.mat",data = mat_file)
+  #writeMat("./data/reallassodatabio.mat",data = mat_file)
+  #writeMat("./data/reallassodatapid.mat",data = mat_file)
+#writeMat("./data/reallassodatareac.mat",data = mat_file)
+#writeMat("./data/reallassodatawiki.mat",data = mat_file)
+  x <- run_matlab_script("./realdatalasso.m")
+  
+  res_reallasso <- read.csv("./reallassomatlab_res.csv", header = F)
+  solve_reallasso = res_reallasso[1,]
+  t_reallasso = res_reallasso[2,]
+  acc_reallasso = res_reallasso[3,]
+  beta_mat <- res_reallasso[-c(1,2,3),drop = F]
+  
+
+  
+  res <- data.frame(
+  
+    acc = c(  acc_realoglasso ,acc_realwsglasso,  acc_realwgllasso, acc_reallasso),
+    time = c(   t_realoglasso, t_realwsglasso, t_realwgllasso,t_reallasso),
+    solvetime = c(  solve_realoglasso, solve_realwsglasso, solve_realwgllasso,solve_reallasso),
+    method = c("og", "wsg", "wgl",  "lasso")
+  )
+  return(res)
+  
+}
+
+
+```
+
+```{r} 
+
+B = 10
+
+res_df_toep <- data.frame(acc = 0,  time = 0,  solvetime = 0, method = "")
+
+for(b in 1:B){
+ 
+  
+        res_cv <- ogreal(Y, X, G, nfold = 5)
+        res_df_toep <- rbind(res_df_toep, res_cv)
+       
+       }
+    
+
+library(dplyr)
+
+res_df_toep <- res_df_toep[-1,]
+
+testres <- read.csv("/Users/mingyuqi/Desktop/G2.csv")
+
+res_summary <- testres %>% group_by( method) %>% summarise(acc_mean = mean(acc), time_mean = mean(time), solvetime_mean = mean(solvetime), )
+
+testres1 <- read.csv("/Users/mingyuqi/Desktop/G1.csv")
+
+res_summary1 <- testres1 %>% group_by( method) %>% summarise(acc_mean = mean(acc), time_mean = mean(time), solvetime_mean = mean(solvetime), )
+
+testres2 <- read.csv("/Users/mingyuqi/Desktop/G.csv")
+
+res_summary2 <- testres2 %>% group_by( method) %>% summarise(acc_mean = mean(acc), time_mean = mean(time), solvetime_mean = mean(solvetime), )
+
+testres3 <- read.csv("/Users/mingyuqi/Desktop/G3.csv")
+
+res_summary3 <- testres3 %>% group_by( method) %>% summarise(acc_mean = mean(acc), time_mean = mean(time), solvetime_mean = mean(solvetime), )
+
+testres4 <- read.csv("/Users/mingyuqi/Desktop/G4.csv")
+
+res_summary4 <- testres4 %>% group_by( method) %>% summarise(acc_mean = mean(acc), time_mean = mean(time), solvetime_mean = mean(solvetime), )
+
+testres5 <- read.csv("/Users/mingyuqi/Desktop/G5.csv")
+
+res_summary5 <- testres5 %>% group_by( method) %>% summarise(acc_mean = mean(acc), time_mean = mean(time), solvetime_mean = mean(solvetime), )
+
+
+write.csv(res_df_toep,"/Users/mingyuqi/Desktop/G5.csv")
+
+library(dplyr)
+
+```
