@@ -1,5 +1,5 @@
 # EAO code
-This is The repository for the code in the paper  about approximating overlapping group lasso by non-overlapping group lasso.
+This is the repository for the code in the paper https://arxiv.org/pdf/2211.09221.pdf about approximating overlapping group lasso by non-overlapping group lasso.
 
 There are two folders in this file, "simulation" and "application", corresponding to the simulation examples and real data analysis in the paper.
 
